@@ -9,3 +9,5 @@ A good idea would be to offoad part of the camera component algorithm onto a sep
 Since all of this is handled in the service, for the activity to display the "flipped-status" (if the device is flipped over or not), desired data can be added to an intent and broadcasted over to an activity, which in turn receives and retrieves the data from the intent and displays it using a textview.
 
 ![alt tag] (http://i.imgur.com/iqi2YA9.png "App Screenshot")
+
+![app gif] (https://github.com/SenSaa/SilentOnFlip/blob/master/S2F_gif2.gif?raw=true)
