@@ -6,7 +6,6 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.graphics.Color;
-import android.graphics.PathDashPathEffect;
 import android.graphics.SurfaceTexture;
 import android.hardware.Camera;
 import android.hardware.Sensor;
@@ -17,13 +16,11 @@ import android.media.AudioManager;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Vibrator;
-import android.support.annotation.Nullable;
-import android.support.v4.app.NotificationCompatBase;
 import android.support.v7.app.NotificationCompat;
 import android.util.Log;
-import android.widget.Button;
 
 import java.io.IOException;
+import java.util.List;
 
 /** Service for silencing device on flipping, even when the activity stops (runs in the background). */
 
@@ -37,9 +34,7 @@ public class FlipService extends Service implements SensorEventListener {
     private float zAccel;
 
     AudioManager audioManager;
-
     public String flipStatus = "";
-
     boolean isFlipped;
 
     private Camera camera;
@@ -51,7 +46,8 @@ public class FlipService extends Service implements SensorEventListener {
     private Handler flipHandler;
 
     NotificationManager notificationManager;
-
+    int defaultRingerMode;
+    private Thread.UncaughtExceptionHandler defaultExceptionHandler;
 
     Intent intent;
     public static final String BROADCAST_ACTION = "com.example.yusuf.silentonflip";
@@ -65,7 +61,6 @@ public class FlipService extends Service implements SensorEventListener {
         // ___ (1) create/instantiate intent. ___ \\
         intent = new Intent(BROADCAST_ACTION);
         // ___________________________________________________________________________ \\
-
 
     }
 
@@ -90,11 +85,18 @@ public class FlipService extends Service implements SensorEventListener {
         flashHandler = new Handler();
         flipHandler = new Handler();
 
+        defaultRingerMode = audioManager.getRingerMode();
 
-        return START_STICKY;
+        // *** Set the default behaviour for UncaughtExceptions.
+        // *** Handle the behaviour manually, instead of allowing the system to force close the app components.
+        defaultExceptionHandler = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler(exceptionHandler);
+
+        // * If START_STICKY is returned - then the service will restart after crash.
+        //return START_STICKY;
+        return START_NOT_STICKY;
     }
 
-    @Nullable
     @Override
     public IBinder onBind(Intent intent) {
         return null;
@@ -102,7 +104,8 @@ public class FlipService extends Service implements SensorEventListener {
 
     @Override
     public void onDestroy() {
-        turnOffFlash();
+        FlashOff flashOffThread = new FlashOff();
+        flashOffThread.start();
 
         if (camera != null) {
             camera.release();
@@ -137,33 +140,22 @@ public class FlipService extends Service implements SensorEventListener {
     // --------------------------------------------------------------------------- \\
     // ___ (3) Silence device on flip. ___ \\
     private void onFlip() {
-        if (zAccel < -8) {
+        if (zAccel < -9) {
 
             Log.v("Z-axis","Flip");
 
             flipStatus = "Flipped!";
-            audioManager.setRingerMode(AudioManager.RINGER_MODE_SILENT);
 
-            Handler duplicateSilence = new Handler();
-            duplicateSilence.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    audioManager.setRingerMode(AudioManager.RINGER_MODE_SILENT);
-                }
-            },100);
+            // Set the Ringtone to silent mode.
+            audioManager.setRingerMode(AudioManager.RINGER_MODE_SILENT);
 
             // --- Limit Flash to a specific period of time. ---
             // Initially, while "isFlipped" flag is false, turn on the flash. Then after a specified delay, change the flag state whereby the flash method will stop being called.
             if (!isFlipped) {
                 // When flipped - turn the flash on.
-                try {
 
-                    Log.v("TurnOnFlash","Called");
+                Log.v("TurnOnFlash", "Called");
 
-                    turnOnFlash();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
                 // After a delay - change "isFlipped" flag state (which will flash method from being invoked).
                 flipHandler.postDelayed(new Runnable() {
                     @Override
@@ -173,16 +165,23 @@ public class FlipService extends Service implements SensorEventListener {
 
                         isFlipped = true;
                     }
-                }, 100);
+                }, 50);
+
+                FlashOn flashOnThread = new FlashOn();
+                flashOnThread.start();
+
             }
+
         }
 
-        else {
+        else if (zAccel > -9) {
 
             Log.v("Z-axis","UnFliped");
 
             flipStatus = "Unflipped";
-            audioManager.setRingerMode(AudioManager.RINGER_MODE_VIBRATE);
+
+            // Reset the Ringtone to its original/default profile before silencing.
+            audioManager.setRingerMode(defaultRingerMode);
 
             // Reset "isFlipped" flag state.
             isFlipped = false;
@@ -196,60 +195,80 @@ public class FlipService extends Service implements SensorEventListener {
 
     // --------------------------------------------------------------------------- \\
     // ___ (3.1) Flash. ___ \\
+
     // Turning On flash
-    private void turnOnFlash() throws IOException {
-        if (!isFlashOn) {
+    public class FlashOn extends Thread {
 
-            if (camera == null || params == null) {
-                return;
-            }
+        public FlashOn() {
+        }
 
-            try {
-                camera.setPreviewTexture(new SurfaceTexture(0));
+        @Override
+        public void run() {
+            if (!isFlashOn && isFlipped) {
 
+                if (camera == null || params == null) {
+                    return;
+                }
+
+                try {
+                    camera.setPreviewTexture(new SurfaceTexture(0));
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
                 Log.v("Camera","Preview Set");
 
-            } catch (IOException e) {
-                e.printStackTrace();
+                List<Camera.Size> sizes = params.getSupportedPreviewSizes();
+                Camera.Size cs = sizes.get(0);
+                params.setPreviewSize(cs.width, cs.height);
+
+                params.setFlashMode(Camera.Parameters.FLASH_MODE_TORCH);
+                camera.setParameters(params);
+                camera.startPreview();
+                isFlashOn = true;
+
+                Log.v("Flash","Handled");
+
+                flashHandler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+
+                        Log.v("TurnOffFlash", "Called");
+
+                        FlashOff flashOffThread = new FlashOff();
+                        flashOffThread.start();
+                    }
+                }, 50);
+
+
+                turnOnVibration();
             }
-
-            params = camera.getParameters();
-            params.setFlashMode(Camera.Parameters.FLASH_MODE_TORCH);
-            camera.setParameters(params);
-            camera.startPreview();
-            isFlashOn = true;
-
-            Log.v("Flash","Handled");
-
-            flashHandler = new Handler();
-            flashHandler.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-
-                    Log.v("TurnOffFlash","Called");
-
-                    turnOffFlash();
-                }
-            }, 200);
-
-
-            turnOnVibration();
         }
     }
 
     // Turning Off flash
-    private void turnOffFlash() {
-        if (isFlashOn) {
-            if (camera == null || params == null) {
-                return;
-            }
+    public class FlashOff extends Thread {
 
-            params = camera.getParameters();
-            params.setFlashMode(Camera.Parameters.FLASH_MODE_OFF);
-            camera.setParameters(params);
-            camera.stopPreview();
-            isFlashOn = false;
+        public FlashOff() {
         }
+
+        @Override
+        public void run() {
+            if (isFlashOn) {
+                if (camera == null || params == null) {
+                    return;
+                }
+
+                List<Camera.Size> sizes = params.getSupportedPreviewSizes();
+                Camera.Size cs = sizes.get(0);
+                params.setPreviewSize(cs.width, cs.height);
+
+                params.setFlashMode(Camera.Parameters.FLASH_MODE_OFF);
+                camera.setParameters(params);
+                camera.stopPreview();
+                isFlashOn = false;
+            }
+        }
+
     }
     // ___________________________________________________________________________ \\
 
@@ -260,16 +279,15 @@ public class FlipService extends Service implements SensorEventListener {
     private void turnOnVibration() {
         if (!isVibrateOn) {
             Vibrator vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
-            vibrator.vibrate(200);
+            vibrator.vibrate(100);
             isVibrateOn = true;
 
-            vibrationHandler = new Handler();
             vibrationHandler.postDelayed(new Runnable() {
                 @Override
                 public void run() {
                     turnOffVibration();
                 }
-            }, 200);
+            }, 100);
         }
     }
     private void turnOffVibration() {
@@ -297,13 +315,13 @@ public class FlipService extends Service implements SensorEventListener {
             if (camera == null) {
                 try {
                     camera = Camera.open();
-                    ///camera = Camera.open(Camera.CameraInfo.CAMERA_FACING_BACK);
+                    //camera = Camera.open(Camera.CameraInfo.CAMERA_FACING_BACK);
                     params = camera.getParameters();
 
                     Log.v("Camera","Open");
 
                 } catch (RuntimeException e) {
-                    Log.e("Camera Error. Failed to Open. Error: ", e.getMessage());
+                    Log.e("Camera Failed to Open: ", e.getMessage());
                 }
             }
         }
@@ -346,12 +364,22 @@ public class FlipService extends Service implements SensorEventListener {
     // ___ (5) add  data to intent ___ \\
     private void broadcastFlippedState() {
         // add "flipStatus" flag to intent.
-        /////intent.putExtra("Counted_Step", flipStatus);
+        //intent.putExtra("Counted_Step", flipStatus);
         intent.putExtra("flip_state", String.valueOf(flipStatus));
         // call sendBroadcast with that intent  - which sends a message to whoever is registered to receive it.
         sendBroadcast(intent);
     }
     // ___________________________________________________________________________ \\
+
+
+    // * Handle UncaughtExceptions.
+    private Thread.UncaughtExceptionHandler exceptionHandler = new Thread.UncaughtExceptionHandler() {
+        @Override
+        public void uncaughtException(Thread thread, Throwable ex) {
+            Log.w("Exception","Alert!!!");
+            ex.printStackTrace();
+        }
+    };
 
 }
 
